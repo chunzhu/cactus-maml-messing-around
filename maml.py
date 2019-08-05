@@ -38,21 +38,17 @@ class MAML:
                 self.dim_hidden = FLAGS.num_filters
                 if FLAGS.resnet:
                     if FLAGS.input_type == 'images_84x84':
-                        self.forward = self.forward_resnet84
-                        self.construct_weights = self.construct_resnet_weights84
-                        assert FLAGS.num_parts_per_res_block == 2
-                        assert FLAGS.num_res_blocks == 4
-                        self.num_parts_per_res_block = FLAGS.num_parts_per_res_block
-                        self.blocks = ['input', 'maxpool', 'res0', 'maxpool', 'res1', 'maxpool', 'res2', 'maxpool', 'res3', 'output']
+                        self.forward = self.construct_forward_resnet(84)
+                        self.construct_weights = self.construct_resnet_weights(84)
                     elif FLAGS.input_type == 'images_224x224':
-                        self.forward = self.forward_resnet224
-                        self.construct_weights = self.construct_resnet_weights224
-                        assert FLAGS.num_parts_per_res_block == 2
-                        assert FLAGS.num_res_blocks == 4
-                        self.num_parts_per_res_block = FLAGS.num_parts_per_res_block
-                        self.blocks = ['input', 'maxpool', 'res0', 'maxpool', 'res1', 'maxpool', 'res2', 'maxpool', 'res3', 'output']
+                        self.forward = self.construct_forward_resnet(224)
+                        self.construct_weights = self.construct_resnet_weights(224)
                     else:
                         raise ValueError
+                    assert FLAGS.num_parts_per_res_block == 2
+                        assert FLAGS.num_res_blocks == 4
+                        self.num_parts_per_res_block = FLAGS.num_parts_per_res_block
+                        self.blocks = ['input', 'maxpool', 'res0', 'maxpool', 'res1', 'maxpool', 'res2', 'maxpool', 'res3', 'output']
                 else:
                     self.forward = self.forward_conv
                     self.construct_weights = self.construct_conv_weights
@@ -190,9 +186,13 @@ class MAML:
                 outputas, outputbs, lossesa, lossesb  = result
 
         ## Performance & Optimization
+        total_loss1 = tf.reduce_sum(lossesa) / tf.to_float(FLAGS.meta_batch_size)
+        total_losses2 = [tf.reduce_sum(lossesb[j]) / tf.to_float(FLAGS.meta_batch_size) for j in range(num_updates)]
         if 'train' in prefix:
-            self.total_loss1 = total_loss1 = tf.reduce_sum(lossesa) / tf.to_float(FLAGS.meta_batch_size)
-            self.total_losses2 = total_losses2 = [tf.reduce_sum(lossesb[j]) / tf.to_float(FLAGS.meta_batch_size) for j in range(num_updates)]
+            #self.total_loss1 = total_loss1 = tf.reduce_sum(lossesa) / tf.to_float(FLAGS.meta_batch_size)
+            #self.total_losses2 = total_losses2 = [tf.reduce_sum(lossesb[j]) / tf.to_float(FLAGS.meta_batch_size) for j in range(num_updates)]
+            self.total_loss1 = total_loss1
+            self.total_losses2 = total_losses2
             # after the map_fn
             self.outputas, self.outputbs = outputas, outputbs
             if self.classification:
@@ -207,8 +207,10 @@ class MAML:
                     gvs = [(tf.clip_by_value(grad, -10, 10), var) for grad, var in gvs]
                 self.metatrain_op = optimizer.apply_gradients(gvs)
         else:
-            self.metaval_total_loss1 = total_loss1 = tf.reduce_sum(lossesa) / tf.to_float(FLAGS.meta_batch_size)
-            self.metaval_total_losses2 = total_losses2 = [tf.reduce_sum(lossesb[j]) / tf.to_float(FLAGS.meta_batch_size) for j in range(num_updates)]
+            #self.metaval_total_loss1 = total_loss1 = tf.reduce_sum(lossesa) / tf.to_float(FLAGS.meta_batch_size)
+            #self.metaval_total_losses2 = total_losses2 = [tf.reduce_sum(lossesb[j]) / tf.to_float(FLAGS.meta_batch_size) for j in range(num_updates)]
+            self.metaval_total_loss1 = total_loss1
+            self.metaval_total_losses2 = total_losses2
             if self.classification:
                 self.metaval_total_accuracy1 = total_accuracy1 = tf.reduce_sum(accuraciesa) / tf.to_float(FLAGS.meta_batch_size)
                 self.metaval_total_accuracies2 = total_accuracies2 =[tf.reduce_sum(accuraciesb[j]) / tf.to_float(FLAGS.meta_batch_size) for j in range(num_updates)]
@@ -293,8 +295,15 @@ class MAML:
         if 'val' in prefix:
             logits = tf.gather(logits, tf.range(self.dim_output_val), axis=1)
         return logits
-
-    def construct_resnet_weights224(self):
+    
+    def construct_resnet_weights(self,length):
+        if length == 84:
+            k = 3 
+        elif length == 224:
+            k = 7
+        else:
+            return None
+        
         weights = OrderedDict()
         dtype = tf.float32
 
@@ -310,7 +319,7 @@ class MAML:
             weights['{}/bias'.format(scope)] = tf.get_variable('{}/bias'.format(scope), [dims_out], initializer=bias_initializer, dtype=dtype)
         for block_name in self.blocks:
             if block_name == 'input':
-                make_conv_layer_weights(weights, block_name, k=7, filters_in=self.channels, filters_out=64)
+                make_conv_layer_weights(weights, block_name, k=k, filters_in=self.channels, filters_out=64)
             elif 'res' in block_name:
                 j = int(block_name[-1])
                 last_block_filter = 64 if j == 0 else 64 * 2 ** (j-1)
@@ -326,99 +335,46 @@ class MAML:
                 make_fc_layer_weights(weights, block_name, dims_in=512, dims_out=self.dim_output_train)
         return weights
 
-    def construct_resnet_weights84(self):
-        weights = OrderedDict()
-        dtype = tf.float32
+    def construct_forward_resnet(self,stridesIndex):
+      strides = []
+      if stridesIndex == 84:
+          strides = [1, 1, 1, 1]
+      elif stridesIndex == 224:
+          strides = [1, 2, 2, 1]
+      else:
+          return None
+        
+      def forward_resnet(self, inp, weights, prefix, reuse=False):
 
-        conv_initializer = tf.contrib.layers.xavier_initializer_conv2d(dtype=dtype)
-        bias_initializer = tf.zeros_initializer(dtype=dtype)
-        fc_initializer = tf.contrib.layers.xavier_initializer(dtype=dtype)
-        def make_conv_layer_weights(weights, scope, k, filters_in, filters_out, bias=True):
-            weights['{}/conv'.format(scope)] = tf.get_variable('{}/conv'.format(scope), [k, k, filters_in, filters_out], initializer=conv_initializer, dtype=dtype)
-            if bias:
-                weights['{}/bias'.format(scope)] = tf.get_variable('{}/bias'.format(scope), [filters_out], initializer=bias_initializer, dtype=dtype)
-        def make_fc_layer_weights(weights, scope, dims_in, dims_out):
-            weights['{}/fc'.format(scope)] = tf.get_variable('{}/fc'.format(scope), [dims_in, dims_out], initializer=fc_initializer, dtype=dtype)
-            weights['{}/bias'.format(scope)] = tf.get_variable('{}/bias'.format(scope), [dims_out], initializer=bias_initializer, dtype=dtype)
-        for block_name in self.blocks:
-            if block_name == 'input':
-                make_conv_layer_weights(weights, block_name, k=3, filters_in=self.channels, filters_out=64)
-            elif 'res' in block_name:
-                j = int(block_name[-1])
-                last_block_filter = 64 if j == 0 else 64 * 2 ** (j - 1)
-                this_block_filter = 64 if j == 0 else last_block_filter * 2
-                print(block_name, last_block_filter, this_block_filter)
-                make_conv_layer_weights(weights, '{}/shortcut'.format(block_name), k=1, filters_in=last_block_filter,
-                                        filters_out=this_block_filter, bias=False)
-                for i in range(self.num_parts_per_res_block):
-                    make_conv_layer_weights(weights, '{}/part{}'.format(block_name, i), k=3,
-                                            filters_in=last_block_filter if i == 0 else this_block_filter,
-                                            filters_out=this_block_filter)
-            elif block_name == 'output':
-                make_fc_layer_weights(weights, block_name, dims_in=512, dims_out=self.dim_output_train)
-        return weights
+          inp = tf.reshape(inp, [-1, self.img_size, self.img_size, self.channels])
 
-    def forward_resnet224(self, inp, weights, prefix, reuse=False):
-
-        inp = tf.reshape(inp, [-1, self.img_size, self.img_size, self.channels])
-
-        for block_name in self.blocks:
-            if block_name == 'input':
-                conv = weights['{}/conv'.format(block_name)]
-                bias = weights['{}/bias'.format(block_name)]
-                inp = tf.nn.conv2d(inp, filter=conv, strides=[1, 2, 2, 1], padding="SAME") + bias
-            elif 'res' in block_name:
-                shortcut = inp
-                conv = weights['{}/shortcut/conv'.format(block_name)]
-                shortcut = tf.nn.conv2d(input=shortcut, filter=conv, strides=[1, 1, 1, 1], padding="SAME")
-                for part in range(self.num_parts_per_res_block):
-                    part_name = 'part{}'.format(part)
-                    scope = '{}/{}'.format(block_name, part_name)
-                    conv = weights['{}/{}/conv'.format(block_name, part_name)]
-                    bias = weights['{}/{}/bias'.format(block_name, part_name)]
-                    inp = bn_relu_conv_block(inp=inp, conv=conv, bias=bias, reuse=reuse, scope=scope)
-                inp = shortcut + inp
-            elif 'maxpool' in block_name:
-                inp = tf.nn.max_pool(inp, [1, 2, 2, 1], [1, 2, 2, 1], "VALID")
-            elif 'output' in block_name:
-                inp = tf.reduce_mean(inp, [1, 2])
-                fc = weights['{}/fc'.format(block_name)]
-                bias = weights['{}/bias'.format(block_name)]
-                inp = tf.matmul(inp, fc) + bias
-                if 'val' in prefix:
-                    inp = tf.gather(inp, tf.range(self.dim_output_val), axis=1)
-        return inp
-
-    def forward_resnet84(self, inp, weights, prefix, reuse=False):
-
-        inp = tf.reshape(inp, [-1, self.img_size, self.img_size, self.channels])
-
-        for block_name in self.blocks:
-            if block_name == 'input':
-                conv = weights['{}/conv'.format(block_name)]
-                bias = weights['{}/bias'.format(block_name)]
-                inp = tf.nn.conv2d(inp, filter=conv, strides=[1, 1, 1, 1], padding="SAME") + bias
-            elif 'res' in block_name:
-                shortcut = inp
-                conv = weights['{}/shortcut/conv'.format(block_name)]
-                shortcut = tf.nn.conv2d(input=shortcut, filter=conv, strides=[1, 1, 1, 1], padding="SAME")
-                for part in range(self.num_parts_per_res_block):
-                    part_name = 'part{}'.format(part)
-                    scope = '{}/{}'.format(block_name, part_name)
-                    conv = weights['{}/{}/conv'.format(block_name, part_name)]
-                    bias = weights['{}/{}/bias'.format(block_name, part_name)]
-                    inp = bn_relu_conv_block(inp=inp, conv=conv, bias=bias, reuse=reuse, scope=scope)
-                inp = shortcut + inp
-            elif 'maxpool' in block_name:
-                inp = tf.nn.max_pool(inp, [1, 2, 2, 1], [1, 2, 2, 1], "VALID")
-            elif 'output' in block_name:
-                inp = tf.reduce_mean(inp, [1, 2])
-                fc = weights['{}/fc'.format(block_name)]
-                bias = weights['{}/bias'.format(block_name)]
-                inp = tf.matmul(inp, fc) + bias
-                if 'val' in prefix:
-                    inp = tf.gather(inp, tf.range(self.dim_output_val), axis=1)
-        return inp
+          for block_name in self.blocks:
+              if block_name == 'input':
+                  conv = weights['{}/conv'.format(block_name)]
+                  bias = weights['{}/bias'.format(block_name)]
+                  inp = tf.nn.conv2d(inp, filter=conv, strides=strides, padding="SAME") + bias
+              elif 'res' in block_name:
+                  shortcut = inp
+                  conv = weights['{}/shortcut/conv'.format(block_name)]
+                  shortcut = tf.nn.conv2d(input=shortcut, filter=conv, strides=[1, 1, 1, 1], padding="SAME")
+                  for part in range(self.num_parts_per_res_block):
+                      part_name = 'part{}'.format(part)
+                      scope = '{}/{}'.format(block_name, part_name)
+                      conv = weights['{}/{}/conv'.format(block_name, part_name)]
+                      bias = weights['{}/{}/bias'.format(block_name, part_name)]
+                      inp = bn_relu_conv_block(inp=inp, conv=conv, bias=bias, reuse=reuse, scope=scope)
+                  inp = shortcut + inp
+              elif 'maxpool' in block_name:
+                  inp = tf.nn.max_pool(inp, [1, 2, 2, 1], [1, 2, 2, 1], "VALID")
+              elif 'output' in block_name:
+                  inp = tf.reduce_mean(inp, [1, 2])
+                  fc = weights['{}/fc'.format(block_name)]
+                  bias = weights['{}/bias'.format(block_name)]
+                  inp = tf.matmul(inp, fc) + bias
+                  if 'val' in prefix:
+                      inp = tf.gather(inp, tf.range(self.dim_output_val), axis=1)
+          return inp
+      return forward_resnet
 
     def wrap(self, inp, weights, prefix, reuse=False, scope=''):
         unused = self.forward_resnet(inp, weights, prefix, reuse=False)

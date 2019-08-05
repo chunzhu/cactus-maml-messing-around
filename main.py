@@ -173,8 +173,9 @@ def test(model, saver, sess, exp_string, data_generator, test_num_updates=None):
     out_name += '_mode' + str(FLAGS.mv_mode) + '_ncv' + str(FLAGS.num_classes_val) + '_test_iubsv' + str(FLAGS.inner_update_batch_size_val) + '_test_q' + str(FLAGS.outer_update_batch_size) + '_stepsize' + str(FLAGS.update_lr) + '_iter' + str(FLAGS.metatrain_iterations)
     out_name = logdir + '/' + exp_string + '/' + out_name[1:]
     out_filename = out_name + '.csv'
-
-    with open(out_filename, 'w') as f:
+    
+    #os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(out_filename, 'w+') as f:
         writer = csv.writer(f, delimiter=',')
         writer.writerow(['update'+str(i) for i in range(len(means))])
         writer.writerow(means)

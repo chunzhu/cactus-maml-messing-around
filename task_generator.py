@@ -150,6 +150,7 @@ class TaskGenerator(object):
                 while True:
                     kmeans = KMeans(n_clusters=n_clusters, init=init, precompute_distances=True, n_jobs=40,
                                     n_init=n_init, max_iter=3000).fit(encodings)
+                                    #n_init=n_init, max_iter=100).fit(encodings)
                     uniques, counts = np.unique(kmeans.labels_, return_counts=True)
                     num_big_enough_clusters = np.sum(counts > self.num_samples_per_class)
                     if num_big_enough_clusters > 0.75 * n_clusters or FLAGS.on_pixels:
